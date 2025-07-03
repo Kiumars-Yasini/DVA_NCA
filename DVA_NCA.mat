@@ -1,7 +1,7 @@
 clc; clear; close all;
 %% From here, we can change the parameters:
 % Data
-dataFile        = "LBE_Samsung_35E_193.mat";  % .mat file name
+dataFile        = "______________.mat";  % .mat file name
 cellIndex       = 1;                            % Cell index to analyze
 % Axis & Plot Settings
 xAxisLimits     = [0, 3.2];                       % SoC (normalized capacity) range
