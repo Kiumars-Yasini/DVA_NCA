@@ -1,0 +1,127 @@
+clc; clear; close all;
+%% From here, we can change the parameters:
+% Data
+dataFile        = "LBE_Samsung_35E_193.mat";  % .mat file name
+cellIndex       = 1;                            % Cell index to analyze
+% Axis & Plot Settings
+xAxisLimits     = [0, 3.2];                       % SoC (normalized capacity) range
+yAxisLimits     = [-6, 0.1];                      % Y-axis (dV/dQ) range
+plotTitleBase   = 'DVA – NCA||GrSi';            % Plot title base
+figurePosition  = [100, 100, 800, 550];         % [x, y, width, height]
+% Color Settings
+colormapName    = 'jet';                        % Colormap name
+cycleMin        = 0;                            % Min cycle count (color range)
+cycleMax        = 1800;                         % Max cycle count
+numColorTicks   = 11;                           % Ticks on colorbar
+% Smoothing Parameters
+movingWin       = 0.01;                         % Moving average window (fraction of data points)
+% Spline Parameters
+numSplinePoints = 700;                          % Number of points to evaluate the spline for plotting AND differentiation
+% Performance Settings
+plotEveryN      = 1;                            % Plot every Nth cycle to reduce clutter
+%% Graphics configuration
+set(0, 'DefaultFigureRenderer', 'painters');    % Avoid GPU-related lag
+%% Data loading
+load(dataFile);
+equiv   = cell_struct.equivalent_cycle_count(:);
+Cycnum  = numel(equiv);
+%% Drawing the graph
+figure; hold on; box on; ax = gca;
+ax.FontSize = 16;
+xlabel('Capacity Ah', 'FontSize', 18);
+ylabel('dV/dQ in V/Ah', 'FontSize', 18); % Still dV/dQ, but now derived from splined V vs Q
+set(gcf, 'Position', figurePosition);
+colormap(colormapName);
+clim([cycleMin cycleMax]);
+% Colorbar
+cb = colorbar;
+tickVals = linspace(cycleMin, cycleMax, numColorTicks);
+cb.Ticks = tickVals;
+cb.TickLabels = round(tickVals);
+cb.Label.String = 'Equivalent cycle count';
+cb.Label.FontSize = 16;
+cb.FontSize = 14;
+%% DVA backbone loop
+plotIndices = 1:plotEveryN:Cycnum;
+for l = plotIndices
+    V_raw = cell_struct.qOCV_DCH{1,l}(:);
+    Ah_raw = cell_struct.AhStep_DCH{1,l}(:);
+    if length(V_raw) < 10 || length(Ah_raw) < 10 || Ah_raw(end) == 0
+        continue;
+    end
+
+    % 1) Remove non-increasing capacity and ensure unique values
+    inc_idx = [true; diff(Ah_raw) > 0];
+    Ah_filt  = Ah_raw(inc_idx);
+    V_filt  = V_raw(inc_idx);
+
+    [Quniq, idxQ] = unique(Ah_filt); % Q (Capacity) as independent variable
+    Vuniq = V_filt(idxQ);            % V (Voltage) as dependent variable
+
+    % 2) Apply Moving Average Smoothing to V (Voltage) data
+    % It's generally better to smooth the original V-Q data BEFORE differentiating
+    % to prevent noise from being amplified by differentiation.
+    windowLength_V = max(3, floor(movingWin * numel(Vuniq))); % Window for V smoothing
+    V_smoothed = smoothdata(Vuniq, 'movmean', windowLength_V);
+
+    % 3) Fit Spline to smoothed V vs. Q data
+    if numel(Quniq) > 3
+        % Define new, finer Q-points for spline evaluation
+        Q_spline = linspace(min(Quniq), max(Quniq), numSplinePoints);
+        % Perform spline interpolation on V vs Q
+        V_spline = spline(Quniq, V_smoothed, Q_spline);
+    else
+        % Fallback if not enough points for a meaningful spline
+        Q_spline = Quniq;
+        V_spline = V_smoothed;
+    end
+
+    % 4) Calculate the derivative (dV/dQ) from the splined data
+    % dVdQ = diff(V_spline) ./ diff(Q_spline);
+    % A more robust way to get the derivative of a spline is often to use
+    % the `fnder` function from the Curve Fitting Toolbox, but if not available,
+    % numerical differentiation of the finely spaced spline points is common.
+    % Let's use numerical differentiation here, as it's built-in.
+
+    % Ensure Q_spline is monotonically increasing
+    diff_Q_spline = diff(Q_spline);
+    if any(diff_Q_spline <= 0)
+        % This should ideally not happen if linspace is used correctly with min < max
+        % but as a safeguard, handle cases where Q_spline might not be strictly increasing.
+        % For DVA, Q must be strictly increasing.
+        % In this context, Q_spline from linspace will always be increasing,
+        % so this check is mostly for conceptual completeness.
+        warning('Q_spline is not strictly increasing. Derivative may be inaccurate.');
+        dVdQ = NaN(size(V_spline) - [0 1]); % Fill with NaNs
+    else
+        dVdQ = diff(V_spline) ./ diff_Q_spline;
+    end
+
+    % 5) Prepare data for plotting
+    % The dVdQ values correspond to the midpoints of the Q_spline intervals.
+    xPlot = (Q_spline(1:end-1) + Q_spline(2:end)) / 2;
+    yPlot = dVdQ;
+
+    % Limit the plotting range for xPlot (capacity) based on xAxisLimits
+    % The spline might extend slightly beyond the original data range,
+    % so we ensure plotting only within the specified capacity limits.
+    validPlotIdx = xPlot >= xAxisLimits(1) & xPlot <= xAxisLimits(2);
+    xPlot = xPlot(validPlotIdx);
+    yPlot = yPlot(validPlotIdx);
+
+    % 6) Plot
+    cmap = colormap(colormapName);
+    cv = (equiv(l) - cycleMin) / (cycleMax - cycleMin);
+    idx = max(1, min(size(cmap,1), round(cv * (size(cmap,1)-1)) + 1));
+    clr = cmap(idx, :);
+
+    plot(xPlot, yPlot, 'LineWidth', 2, 'Color', clr);
+
+    if mod(l, 50) == 1
+        drawnow;
+    end
+end
+%% Beautify
+title([plotTitleBase '0' num2str(cellIndex)], 'FontSize', 20);
+xlim(xAxisLimits);
+ylim(yAxisLimits);
